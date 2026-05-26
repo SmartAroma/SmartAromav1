@@ -49,6 +49,8 @@ class PublicState:
     opening_line: str | None = None
     explanation: str | None = None
     closing_line: str | None = None
+    total_duration_sec: int = 0
+    sequence: list[dict[str, Any]] = field(default_factory=list)
     current_aroma: str | None = None
     fan_speed: int = 0
     segment_index: int = -1
@@ -69,6 +71,8 @@ class PublicState:
             "opening_line": self.opening_line,
             "explanation": self.explanation,
             "closing_line": self.closing_line,
+            "total_duration_sec": self.total_duration_sec,
+            "sequence": self.sequence,
             "current_aroma": self.current_aroma,
             "fan_speed": self.fan_speed,
             "segment_index": self.segment_index,
@@ -129,6 +133,29 @@ class AromaController:
         )
         return True, "已开始生成香氛方案"
 
+    def start_plan(self, plan: AromaPlan) -> tuple[bool, str]:
+        """Run an already generated plan, for exact history replay."""
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                if self._state.phase in (Phase.GENERATING, Phase.RUNNING, Phase.PAUSED):
+                    return False, "已有任务进行中"
+            self._stop.clear()
+            self._pause.clear()
+            self._worker = threading.Thread(
+                target=self._run_existing_plan,
+                args=(plan,),
+                daemon=True,
+            )
+            self._worker.start()
+        log.info(
+            "User action: start existing plan scene=%s persona=%s duration_level=%s plan=%s",
+            plan.scene,
+            plan.persona,
+            plan.duration_level,
+            plan.plan_name,
+        )
+        return True, "已复用历史方案并开始运行"
+
     def pause(self) -> tuple[bool, str]:
         with self._lock:
             if self._state.phase != Phase.RUNNING:
@@ -174,6 +201,8 @@ class AromaController:
             opening_line=None,
             explanation=None,
             closing_line=None,
+            total_duration_sec=0,
+            sequence=[],
             current_aroma=None,
             fan_speed=0,
             segment_index=-1,
@@ -202,6 +231,30 @@ class AromaController:
 
         self._execute_plan(plan)
 
+    def _run_existing_plan(self, plan: AromaPlan) -> None:
+        self._set_state(
+            phase=Phase.RUNNING,
+            scene=plan.scene,
+            preference=plan.preference,
+            persona=plan.persona,
+            duration_level=plan.duration_level,
+            plan_name=plan.plan_name,
+            mood_tag=plan.mood_tag,
+            opening_line=plan.opening_line,
+            explanation=plan.explanation,
+            closing_line=plan.closing_line,
+            total_duration_sec=plan.total_duration_sec,
+            sequence=[step.model_dump() for step in plan.sequence],
+            current_aroma=None,
+            fan_speed=0,
+            segment_index=-1,
+            segment_count=len(plan.sequence),
+            segment_remaining_sec=0,
+            total_remaining_sec=plan.total_duration_sec,
+            error_message=None,
+        )
+        self._execute_plan(plan)
+
     def _execute_plan(self, plan: AromaPlan) -> None:
         seq = plan.sequence
         n = len(seq)
@@ -218,6 +271,8 @@ class AromaController:
             opening_line=plan.opening_line,
             explanation=plan.explanation,
             closing_line=plan.closing_line,
+            total_duration_sec=plan.total_duration_sec,
+            sequence=[step.model_dump() for step in plan.sequence],
             segment_count=n,
             total_remaining_sec=total_left,
             error_message=None,
